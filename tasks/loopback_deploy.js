@@ -8,43 +8,176 @@
 
 'use strict';
 
+var semver = require('semver');
+var shell = require('shelljs');
+
 module.exports = function(grunt) {
 
-  // Please see the Grunt documentation for more information regarding task
-  // creation: http://gruntjs.com/creating-tasks
+	grunt.registerTask('loopback_deploy', 'Automate loopback application version numbering and deployment to production server', function() {
+		// Options.
+		var options = this.options({
+			filepaths: ['package.json'],
+			syncVersions: false,
+			commit: true,
+			commitMessage: 'Bumping version to {%= version %}.',
+			addAllToCommit: true,
+			push: true,
+			deployBranch: true,
+			deploySLCPMServerURL: false,
+			branchName: 'deploy_{%= version %}'
+		});
+		if(options.deployBranch && !options.deploySLCPMServerURL){
+			grunt.log.error('Error: Delopy option true but no deploySLCPMServerURL provided.');
+		}
+		// Validate specified semver increment modes.
+		var valids = ['major', 'minor', 'patch'];
+		var modes = [];
+		this.args.forEach(function(mode) {
+			var matches = [];
+			valids.forEach(function(valid) {
+				if (valid.indexOf(mode) === 0) { matches.push(valid); }
+			});
+			if (matches.length === 0) {
+				grunt.log.error('Error: mode "' + mode + '" does not match any known modes.');
+			} else if (matches.length > 1) {
+				grunt.log.error('Error: mode "' + mode + '" is ambiguous (possibly: ' + matches.join(', ') + ').');
+			} else {
+				modes.push(matches[0]);
+			}
+		});
+		if (this.errorCount === 0 && modes.length === 0) {
+			grunt.log.error('Error: no modes specified.');
+		}
+		if (this.errorCount > 0) {
+			grunt.log.error('Valid modes are: ' + valids.join(', ') + '.');
+			throw new Error('Use valid modes (or unambiguous mode abbreviations).');
+		}
 
-  grunt.registerMultiTask('loopback_deploy', 'Automate loopback application version numbering and delopment to production server', function() {
-    // Merge task-specific and/or target-specific options with these defaults.
-    var options = this.options({
-      punctuation: '.',
-      separator: ', '
-    });
+		// Normalize filepaths to array.
+		var filepaths = Array.isArray(options.filepaths) ? options.filepaths : [options.filepaths];
+		// Process JSON files, in-order.
+		var versions = {};
+		filepaths.forEach(function(filepath) {
+			var o = grunt.file.readJSON(filepath);
+			var origVersion = o.version;
+			// If syncVersions is enabled, only grab version from the first file,
+			// guaranteeing new versions will always be in sync.
+			var firstVersion = Object.keys(versions)[0];
+			if (options.syncVersions && firstVersion) {
+				o.version = firstVersion;
+			}
+			modes.forEach(function(mode) {
+				var orig = o.version;
+				var s = semver.parse(o.version);
+				s.inc(mode);
+				o.version = String(s);
+				// Workaround for https://github.com/isaacs/node-semver/issues/50
+				if (/-/.test(orig) && mode === 'patch') {
+					o.version = o.version.replace(/\d+$/, function(n) { return n - 1; });
+				}
+				// If prerelease on an un-prerelease version, bump patch version first
+				if (!/-/.test(orig) && mode === 'prerelease') {
+					s.inc('patch');
+					s.inc('prerelease');
+					o.version = String(s);
+				}
+			});
+			if (versions[origVersion]) {
+				versions[origVersion].filepaths.push(filepath);
+			} else {
+				versions[origVersion] = {version: o.version, filepaths: [filepath]};
+			}
+			// Actually *do* something.
+			grunt.log.write('Bumping version in ' + filepath + ' from ' + origVersion + ' to ' + o.version + '...');
+			grunt.file.write(filepath, JSON.stringify(o, null, 2));
+			grunt.log.ok();
+		});
+		// Commit changed files?
+		if (options.commit) {
+			Object.keys(versions).forEach(function(origVersion) {
+				var o = versions[origVersion];
+				commit(o.filepaths, processTemplate(options.commitMessage, {
+					version: o.version,
+					origVersion: origVersion
+				}),options.addAllToCommit);
+			});
+		}
+		// Push Changes?
+		if(options.push){
+			push();
+		}
 
-    // Iterate over all specified file groups.
-    this.files.forEach(function(f) {
-      // Concat specified files.
-      var src = f.src.filter(function(filepath) {
-        // Warn on and remove invalid source files (if nonull was set).
-        if (!grunt.file.exists(filepath)) {
-          grunt.log.warn('Source file "' + filepath + '" not found.');
-          return false;
-        } else {
-          return true;
-        }
-      }).map(function(filepath) {
-        // Read file source.
-        return grunt.file.read(filepath);
-      }).join(grunt.util.normalizelf(options.separator));
+		if(options.deployBranch){
+			deployBranch(options.branchName, options.deploySLCPMServerURL);
+		}
+		// We're only going to create one tag. And it's going to be the new
+		// version of the first bumped file. Because, sanity.
+		var newVersion = versions[Object.keys(versions)[0]].version;
+		if (options.tag) {
+			if (options.tagPrerelease || modes.indexOf('prerelease') === -1) {
+				tag(
+					processTemplate(options.tagName, {version: newVersion}),
+					processTemplate(options.tagMessage, {version: newVersion})
+				);
+			} else {
+				grunt.log.writeln('Not tagging (prerelease version).');
+			}
+		}
+		if (this.errorCount > 0) {
+			grunt.warn('There were errors.');
+		}
+	});
 
-      // Handle options.
-      src += options.punctuation;
+	// Using custom delimiters keeps templates from being auto-processed.
+	grunt.template.addDelimiters('bump', '{%', '%}');
 
-      // Write the destination file.
-      grunt.file.write(f.dest, src);
+	function processTemplate(message, data) {
+		return grunt.template.process(message, {
+			delimiters: 'bump',
+			data: data,
+		});
+	}
 
-      // Print a success message.
-      grunt.log.writeln('File "' + f.dest + '" created.');
-    });
-  });
+	function commit(filepaths, message, addAll) {
+		if(addAll){
+			grunt.log.writeln('Adding any new files to repository tracking...');
+			run('git add .');
+			grunt.log.writeln('Committing with message: ' + message);
+			run('git commit -m "' + message + '"');
+		}else{
+			grunt.log.writeln('Committing ' + filepaths.join(', ') + ' with message: ' + message);
+			run('git commit -m "' + message + '" "' + filepaths.join('" "') + '"');
+		}
+	}
+
+	function push() {
+		grunt.log.writeln('Pushing changes to remote');
+		run('git push');
+	}
+
+	function deployBranch(name, deploySLCPMServerURL) {
+		grunt.log.writeln('Checking out new branch ' + name);
+		run('git checkout -b ' + name);
+		grunt.log.writeln('Building loopback app onto branch and committing' + name);
+		run('slc build --onto '+name+' --install --commit');
+		grunt.log.writeln('Pushing branch to remote');
+		run('git push origin '+name);
+		grunt.log.writeln('Deploying branch to SLC PM Server at: ' + deploySLCPMServerURL);
+		run('slc deploy '+deploySLCPMServerURL+' '+name);
+		grunt.log.writeln('Returning to master branch...');
+		run('git checkout -f master');
+	}
+
+	function run(cmd) {
+		if (grunt.option('no-write')) {
+			grunt.verbose.writeln('Not actually running: ' + cmd);
+		} else {
+			grunt.verbose.writeln('Running: ' + cmd);
+			var result = shell.exec(cmd, {silent:true});
+			if (result.code !== 0) {
+				grunt.log.error('Error (' + result.code + ') ' + result.output);
+			}
+		}
+	}
 
 };

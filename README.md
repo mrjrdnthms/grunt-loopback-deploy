@@ -1,6 +1,6 @@
 # grunt-loopback-deploy
 
-> Automate loopback application version numbering and delopment to production server
+> Automate loopback application version numbering and deployment to production server
 
 ## Getting Started
 This plugin requires Grunt `~0.4.5`
