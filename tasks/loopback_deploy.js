@@ -113,7 +113,7 @@ module.exports = function(grunt) {
 	function processTemplate(message, data) {
 		return grunt.template.process(message, {
 			delimiters: 'bump',
-			data: data,
+			data: data
 		});
 	}
 
