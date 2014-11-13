@@ -6,6 +6,8 @@
  * Licensed under the MIT license.
  */
 
+// Much of the code below is borrowed from https://github.com/gruntjs/grunt-contrib-bump a great library to bump package.json and commit to git
+
 'use strict';
 
 var semver = require('semver');
