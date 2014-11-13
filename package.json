@@ -1,7 +1,7 @@
 {
   "name": "grunt-loopback-deploy",
   "description": "Automate loopback application version numbering and delopment to production server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "homepage": "https://github.com/mrjrdnthms/grunt-loopback-deploy",
   "author": {
     "name": "mrjrdnthms",
